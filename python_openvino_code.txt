@@ -1,0 +1,121 @@
+import cv2
+import numpy as np
+import time
+from openvino.runtime import Core
+
+# Function to draw discount message within section boundaries
+def draw_discount_text(frame, section_rects, discount_active):
+    for i, (x1, x2) in enumerate(section_rects):
+        if discount_active[i]:
+            text = "20% DISCOUNT \nON THIS SECTION\nFOR NEXT 20 MINUTES"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            text_size = cv2.getTextSize(text.split("\n")[0], font, font_scale, thickness)[0]
+            line_height = text_size[1] + 5
+            
+            # Calculate text position inside the section
+            text_x = x1 + (x2 - x1) // 4
+            text_y = 50  # Fixed height near the top
+
+            # Draw text inside the section
+            for j, line in enumerate(text.split("\n")):
+                cv2.putText(frame, line, (text_x, text_y + j * line_height), font, font_scale, (0, 255, 255), thickness, cv2.LINE_AA)
+
+# Load OpenVINO model
+def load_openvino_model(model_path):
+    ie = Core()
+    model = ie.read_model(model_path)
+    compiled_model = ie.compile_model(model, "CPU")
+    return compiled_model, compiled_model.inputs[0].shape
+
+# Run inference with OpenVINO
+def infer_openvino(model, frame):
+    # Convert to RGB (if the model expects RGB input)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Resize to match the model's expected input size (640x640 for YOLOv8 models)
+    input_tensor = cv2.resize(frame_rgb, (640, 640))  # Resize to 640x640
+    input_tensor = input_tensor.transpose(2, 0, 1)  # Convert HWC to CHW
+    input_tensor = np.expand_dims(input_tensor, axis=0).astype(np.float32) / 255.0  # Normalize
+    
+    # Get output from model
+    output = model([input_tensor])[model.outputs[0]]
+    
+    # Flip frame horizontally if necessary (for visualization)
+    frame = cv2.flip(frame, 1)  # Flip horizontally (if needed)
+    
+    return output, frame
+
+# Main function
+def main(video_path, num_sections):
+    model, input_shape = load_openvino_model(r"C:\Users\DAITHIYA SUDHAN\yolov8_openvino\yolov8n.xml")  # Path to OpenVINO model
+    
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Cannot open video file.")
+        return
+
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+
+    section_width = frame_width // num_sections
+    section_rects = [(i * section_width, (i + 1) * section_width) for i in range(num_sections)]
+
+    discount_active = [False] * num_sections
+    section_timers = [None] * num_sections  # Store start time for discount
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Perform inference and get output
+        detections, frame = infer_openvino(model, frame)
+        section_counts = [0] * num_sections  # Reset counts each frame
+
+        for detection in detections[0]:  # Iterate over detections
+            x1, y1, x2, y2, conf, cls = detection[:6]
+            
+            # Adjust the coordinates if necessary (if x1 > x2, swap them)
+            if x1 > x2:
+                x1, x2 = x2, x1  # Swap x1 and x2 if they are inverted
+            if y1 > y2:
+                y1, y2 = y2, y1  # Swap y1 and y2 if they are inverted
+
+            if int(cls) == 0:  # Check if the class is 'person' (class 0)
+                center_x = (x1 + x2) / 2
+                section_index = int(center_x // section_width)
+                section_index = min(section_index, num_sections - 1)  
+                section_counts[section_index] += 1
+
+        # Update discount status
+        for i in range(num_sections):
+            if section_counts[i] <= 1:
+                if section_timers[i] is None:
+                    section_timers[i] = time.time()  # Start timer
+                elif time.time() - section_timers[i] > 10:  # Check 10s condition
+                    discount_active[i] = True
+            else:
+                discount_active[i] = False
+                section_timers[i] = None  # Reset timer when >2 people are present
+            if section_counts[i] > 10:
+                discount_active[i] = False  # Remove discount when more than 10 people come
+
+        draw_discount_text(frame, section_rects, discount_active)  # Display discount
+
+        # Draw section boundaries
+        for x1, x2 in section_rects:
+            cv2.line(frame, (x1, 0), (x1, frame_height), (255, 255, 255), 2)
+
+        cv2.imshow("Discount Detection", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# Get user input for sections
+video_path = r"D:\Intel_unnati\1st_TRY\istockphoto-1995820194-640_adpp_is.mp4"
+num_sections = int(input("Enter number of sections: "))
+main(video_path, num_sections)
